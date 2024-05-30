@@ -13,9 +13,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import random
+#데이터를 csv로 저장하려고 만들었다
+import pandas as pd
 
 #gym 환경 설정
-env = gym.make("Assault-v4",render_mode="rgb_array")
+env = gym.make("Assault-v4",render_mode="rgb_array", frameskip=3)
 
 env.reset() #환경 초기화
 env.render()  # 환경을 시각화합니다.
@@ -79,7 +81,7 @@ class ReplayMemory(object):
 #입실론 값 정하기 80% 확률로 넘어간다.
 eps_start = 0.9
 eps_end = 0.05
-eps_decay = 200
+eps_decay = 1000000
 steps_done = 0
 
 #일단 입실론 그리디 방법에서 입실론이 동일한 상황을 가정하고 먼저 만들어 보자.
@@ -120,11 +122,13 @@ n_action_space = env.action_space.n
 #DQN 모델 만들기
 policy_net = DQN(n_action_space).to(device)
 target_net = DQN(n_action_space).to(device)
+#모델 불러와서 학습 시키기
+policy_net.load_state_dict(torch.load('test_model1.pth'))
 #policy_net의 가중치 편향 및 매개변수를 포함하는 상태를 딕셔너리 형대로 반환받고, 그 반환 받은 딕셔너리 형태를 target_network가 업데이트 한다.
 target_net.load_state_dict(policy_net.state_dict())
 #리플레이 메모리 만들기, 배치 사이즈 설정
-Memory = ReplayMemory(capacity= 10000)
-batch_size = 100 
+Memory = ReplayMemory(capacity= 1000000)
+batch_size = 128
 
 #필요한 변수들
 discount_rate = 0.99        #할인률 설정
@@ -133,70 +137,75 @@ loss_fn = nn.MSELoss()
 
 # 모델 최적화 하는 부분
 def optimize_model():
-    #만약 리플레이 버퍼에 저장된 데이터의 크기가 배치 사이즈보다 작으면, -1 반환하면서 아무 것도 하지 않는다.
-    if Memory.__len__() < batch_size:
-        return 
-    #배치 사이즈 개수 만큼 샘플 가져오기
+    if len(Memory) < batch_size:
+        return
     replay_Memory = Memory.sample(batch_size)
-    #zip은 여러 개의 데이터를 튜플로 만들어주는 연산자 *는 언패킹 연산자이다. 따라서 zip(*뭐시기는) 튜플을 풀어 줘서 맞는 애들끼리 모아준다.
-    state, action, next_state, reward = zip(*replay_Memory)
-    #텐서들을 연결하는 함수 cat
-    state = torch.cat(state)
-    action = torch.cat(action)
-    next_state = torch.cat(next_state)
-    reward = torch.tensor(reward)
+    
+    state_batch = torch.cat([transition.state for transition in replay_Memory])
+    action_batch = torch.cat([transition.action for transition in replay_Memory])
+    reward_batch = torch.cat([torch.tensor([transition.reward], device=device) for transition in replay_Memory])
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None, [transition.next_state for transition in replay_Memory])), device=device, dtype=torch.bool)
+    non_final_next_states = torch.cat([transition.next_state for transition in replay_Memory if transition.next_state is not None])
 
-    #정책에 의해 선택된 action 값에 따라 나온 Q 값
-    policy_Q = torch.gather(policy_net(state), 1, action).squeeze(1)
-    #액션을 취한 상태에서 그 자리의 Q 값을 계산 
-    with torch.no_grad():
-        target_Q =  reward + discount_rate * target_net(next_state).max(1)[0]
-    loss = loss_fn(target_Q,policy_Q)
+    policy_Q = policy_net(state_batch).gather(1, action_batch)
 
-    #네트워크 최적화
+    next_state_values = torch.zeros(batch_size, device=device)
+    next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
+
+    target_Q = reward_batch + (discount_rate * next_state_values)
+    
+    loss = loss_fn(policy_Q, target_Q.unsqueeze(1))
+
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
 
 #일단 에피소드 진행하기 관련 변수들
-num_eqi = 200            #에피소드 개수
+num_eqi = 1            #에피소드 개수
 time_step = 5000        #타임스텝
 update_target = 10      #타겟 네트워트를 몇번의 학습마다 업데이트 할 건가
+data_df = pd.DataFrame({'epi' : [], 'end_time_step' : [], 'total_return' : []})            #학습 데이터를 저장할 데이터 프레임
+
 
 for epi in range(num_eqi):
     #환경 초기화
-    env.reset()
+    state, info = env.reset()
     Return = 0
+    # 초기 이미지 먼저 전처리
+    state = preprocessing_state(state)
     for i in range(time_step):
-        # 환경을 시각화
-        game_image = env.render()
-        # 이미지 전처리
-        state = preprocessing_state(game_image)
         # 입실론 그리디 알고리즘에 의해 다음 액션 선택
         new_action = select_action(state)
         # 수행 이후 데이터 받아오기
         new_state, reward, done, truncated, info = env.step(new_action.item())
         # 다음 상태도 전처리 하기
         new_state = preprocessing_state(new_state)
+        # 만약 마지막이면, 다음 상태 데이터는 None으로 넣어주기
+        if done:
+            new_state = None
         #리플레이 버퍼에 넣기
         Memory.push(state, new_action, new_state, reward)
+        #다음 상태로 넘어가기 - 전처리된 데이터가 들어간다
+        state = new_state
         #모델 최적화
         optimize_model()
 
         Return += reward
         if done == True:
-            print(f"epi: {i}, Value: {Return}")
-            #마지막 종료 시에는 이미지 그래프 출력
-            if epi == (num_eqi - 1):
-                #텐서에서 크기가 1인 차원 삭제
-                state = state.squeeze()
-                plt_preprocessing_image(game_image,state)
+            print(f"epi: {epi}, total_time_step: {i}, Value: {Return}")
+            #에피소드 데이터 프레임에 데이터 저장
+            epi_df = pd.DataFrame({'epi' : [epi], 'end_time_step' : [i], 'total_return' : [Return]})
+            data_df = pd.concat([data_df, epi_df], ignore_index= True)
             break 
     #정해진 횟수마다 정책 네트워크 파라미터를 타겟 네트워크 파라미터로 넣기
     if epi % update_target == 0:
         target_net.load_state_dict(policy_net.state_dict())
-    
+        print("target_net is update!")
 
 #모델 저장하기
-torch.save(model.state_dict(), "test_model1.pth")
-print("Saved PyTorch Model State to model.pth")
+torch.save(policy_net.state_dict(), "test_model1.pth")
+print("Saved PyTorch Model State to test_model1.pth")
+#기존 데이터들이 저장된 파일에 추가하기
+#a 모드가 추가모드, 기존 데이터와 인덱스가 동일하다는 가정 하에 무시하기
+data_df.to_csv('my_data.csv', mode='a', header=False, index=False)
+print("Saved train_data")

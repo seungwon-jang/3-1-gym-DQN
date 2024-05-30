@@ -82,7 +82,6 @@ n_actions = env.action_space.n
 state, info = env.reset()
 print("state : {}".format(state))
 n_observations = len(state)
-print(n_observations)
 
 policy_net = DQN(n_observations, n_actions).to(device)
 target_net = DQN(n_observations, n_actions).to(device)
@@ -171,8 +170,6 @@ def optimize_model():
         next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
     # 기대 Q 값 계산
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
-    print(expected_state_action_values)
-
     # Huber 손실 계산
     criterion = nn.SmoothL1Loss()
     loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
@@ -187,7 +184,7 @@ def optimize_model():
 if torch.cuda.is_available():
     num_episodes = 600
 else:
-    num_episodes = 50
+    num_episodes = 500
 
 for i_episode in range(num_episodes):
     # 환경과 상태 초기화
@@ -224,6 +221,7 @@ for i_episode in range(num_episodes):
         if done:
             episode_durations.append(t + 1)
             plot_durations()
+            print(t)
             break
 
 print('Complete')
